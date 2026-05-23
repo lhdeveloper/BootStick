@@ -17,6 +17,7 @@ jobs:
       - name: Criar pacote
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "s|SCRIPT_VERSION=.*|SCRIPT_VERSION=\"${VERSION}\"|" BootStick.command
           zip -j "BootStick-${VERSION}.zip" BootStick.command README.md LICENSE
 
       - uses: softprops/action-gh-release@v2
