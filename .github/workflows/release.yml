@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validar tag e versão do script
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION=$(grep -E '^SCRIPT_VERSION=' BootStick.command | sed -E 's/^SCRIPT_VERSION="([^"]+)".*/\1/')
+          EXPECTED="v${VERSION}"
+          if [[ "$TAG" != "$EXPECTED" ]]; then
+            echo "::error::Tag ${TAG} não corresponde a SCRIPT_VERSION=${VERSION} (esperado ${EXPECTED})"
+            exit 1
+          fi
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Validar sintaxe do script
+        run: |
+          zsh -n BootStick.command
+
+      - name: Criar pacote da release
+        run: |
+          ARCHIVE="BootStick-${VERSION}.zip"
+          zip -j "$ARCHIVE" BootStick.command README.md LICENSE
+          echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      - name: Publicar release no GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          name: BootStick v${{ env.VERSION }}
+          generate_release_notes: true
+          files: ${{ env.ARCHIVE }}
