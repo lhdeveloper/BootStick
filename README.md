@@ -12,15 +12,18 @@ Criar um pendrive ou SSD externo bootável com o instalador do macOS e preparar 
 
 ## Fluxo
 
-```
-D → F → I → B → E
-```
+Dois pré-requisitos independentes — podem ser feitos em qualquer ordem:
 
-| Etapa | Ação |
-|-------|------|
+| | Ação |
+|-|------|
+| **M** | Obter instalador macOS — baixar dos servidores Apple ou selecionar um já existente em `/Applications` |
 | **D** | Selecionar disco USB/SSD externo |
-| **F** | Formatar em GPT + Mac OS Extended (JHFS+) |
-| **I** | Escolher instalador em `/Applications` |
+
+Com os dois prontos, o menu guia pelo restante:
+
+| | Ação |
+|-|------|
+| **F** | Formatar disco em GPT + Mac OS Extended (JHFS+) |
 | **B** | Criar mídia bootável |
 | **E** | Montar e abrir partição EFI no Finder |
 
