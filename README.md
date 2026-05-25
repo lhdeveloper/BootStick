@@ -2,9 +2,9 @@
 
 Assistente interativo em Terminal para criar mídia bootável de instalação do macOS em projetos Hackintosh (OpenCore).
 
-<p align="center">
-  <img src="assets/screenshot.png" alt="BootStick screenshot" width="700">
-</p>
+<div align="center">
+  <img src="assets/screenshot.png" style="border-radius:20px;" alt="BootStick screenshot" width="100%" height="100%"/>
+</div>
 
 ---
 
