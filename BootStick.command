@@ -1,7 +1,7 @@
 #!/bin/zsh
 
-# Limpa scrollback + tela (remove linha "/path/BootStick.command ; exit;" do Terminal)
-[[ -t 1 ]] && printf '\033[3J\033[2J\033[H'
+# Entra no alternate screen imediatamente — esconde o echo do Apple Terminal antes de tudo
+[[ -t 1 ]] && printf '\033[?1049h\033[H\033[2J\033[3J'
 
 # =========================================================
 # BootStick — Hackintosh bootable USB assistant
@@ -11,10 +11,11 @@ setopt NO_NOMATCH 2>/dev/null
 
 APP_NAME="BootStick"
 APP_TAGLINE="Assistente de mídia bootável para Hackintosh"
-SCRIPT_VERSION=$(git -C "$(dirname "$0")" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "1.4.0")
+SCRIPT_VERSION=$(git -C "$(dirname "$0")" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "1.5.0")
 SCRIPT_BUILD=$(date -r "$0" +%Y.%m.%d 2>/dev/null || echo "—")
 VOLUME_NAME="Install macOS"
 DISK_FORMAT="JHFS+"
+LOG_FILE="/tmp/bootstick_last.log"
 
 SELECTED_DISK=""
 SELECTED_DISK_NAME=""
@@ -25,9 +26,6 @@ SPINNER_PID=""
 PICKER_RESULT=0
 MENU_RESULT=""
 DEMO_MODE=0
-
-typeset -a MENU_LETTERS
-MENU_LETTERS=( A B C D E F G H I J K L M N O P Q R S T U V W X Y Z )
 
 if [[ -t 1 ]]; then
     C_RESET=$'\033[0m'
@@ -41,25 +39,24 @@ else
     C_RESET="" C_DIM="" C_BOLD="" C_TITLE="" C_ACCENT="" C_WARN="" C_OK=""
 fi
 
-TERM_ROWS=48
+TERM_ROWS=32
 
 clear_screen() {
-    printf '\033[3J\033[2J\033[H'
+    # \033[H     — cursor pro topo
+    # \033[2J    — limpa a tela visível
+    # \033[3J    — remove scrollback (impede rolagem)
+    printf '\033[H\033[2J\033[3J'
 }
 
 init_terminal() {
     [[ -t 1 ]] || return
-
-    local cols
-    cols=$(tput cols 2>/dev/null)
-    (( cols < 1 )) && cols=80
-
-    # Título da janela
     printf '\e]0;%s v%s\a' "$APP_NAME" "$SCRIPT_VERSION"
 
-    # Só aumenta a altura; largura permanece a do Terminal
-    sleep 0.2
-    printf '\e[8;%d;%dt' "$TERM_ROWS" "$cols" 2>/dev/null
+    # Redimensiona a janela para TERM_ROWS linhas.
+    # Usa AppleScript no Apple Terminal (cálculo proporcional, independe do tamanho de fonte).
+    # Usa escape xterm em outros terminais (iTerm2, etc.).
+    local curr_rows
+    curr_rows=$(tput lines 2>/dev/null || echo 24)
 
     if [[ "$TERM_PROGRAM" == "Apple_Terminal" ]]; then
         osascript 2>/dev/null <<EOF
@@ -67,21 +64,27 @@ tell application "Terminal"
     if (count of windows) > 0 then
         tell front window
             set b to bounds
-            set bounds to {item 1 of b, item 2 of b, item 3 of b, item 2 of b + 680}
+            set newH to ((item 4 of b - item 2 of b) * $TERM_ROWS / $curr_rows) as integer
+            set bounds to {item 1 of b, item 2 of b, item 3 of b, (item 2 of b) + newH}
         end tell
     end if
 end tell
 EOF
+    else
+        local cols
+        cols=$(tput cols 2>/dev/null || echo 80)
+        printf '\033[8;%d;%dt' "$TERM_ROWS" "$cols"
     fi
 
+    sleep 0.2
     clear_screen
 }
 
-term_too_small() {
-    local lines
-    lines=$(tput lines 2>/dev/null || echo 0)
-    (( lines > 0 && lines < 32 ))
+exit_terminal() {
+    printf '\033[?1049l'   # restaura o terminal principal com histórico intacto
 }
+
+trap 'exit_terminal' EXIT
 
 pause() {
     echo ""
@@ -161,16 +164,37 @@ print_version_badge() {
     printf "  ${C_ACCENT}${C_BOLD} v${SCRIPT_VERSION}${C_RESET}  ${C_DIM}·  build ${SCRIPT_BUILD}  ·  Hackintosh / OpenCore${C_RESET}\n"
 }
 
+# Indicador visual de etapas do fluxo
+print_step_indicator() {
+    local m_l="macOS" d_l="Disco" f_l="Format" b_l="Boot" e_l="EFI"
+    local m_c d_c f_c b_c e_c
+    m_c="$C_DIM"; d_c="$C_DIM"; f_c="$C_DIM"; b_c="$C_DIM"; e_c="$C_DIM"
+
+    if [[ -n "$SELECTED_INSTALLER" ]]; then m_l="macOS ✓"; m_c="$C_OK"; fi
+    if [[ -n "$SELECTED_DISK" ]];      then d_l="Disco ✓"; d_c="$C_OK"; fi
+    if (( DISK_FORMATTED ));           then f_l="Format ✓"; f_c="$C_OK"; fi
+    if (( INSTALLER_CREATED ));        then b_l="Boot ✓"; b_c="$C_OK"; e_l="EFI →"; e_c="$C_ACCENT"; fi
+
+    printf "  "
+    printf "${m_c}%s${C_RESET}" "$m_l"
+    printf "${C_DIM} ──▶ ${C_RESET}"
+    printf "${d_c}%s${C_RESET}" "$d_l"
+    printf "${C_DIM} ──▶ ${C_RESET}"
+    printf "${f_c}%s${C_RESET}" "$f_l"
+    printf "${C_DIM} ──▶ ${C_RESET}"
+    printf "${b_c}%s${C_RESET}" "$b_l"
+    printf "${C_DIM} ──▶ ${C_RESET}"
+    printf "${e_c}%s${C_RESET}\n" "$e_l"
+}
+
 print_banner() {
     local subtitle="${1:-}"
 
-    echo ""
     print_ascii_logo
     echo ""
     print_version_badge
 
     if [[ -n "$subtitle" ]]; then
-        echo ""
         printf "  ${C_DIM}%s${C_RESET}\n" "$subtitle"
     fi
 
@@ -194,13 +218,16 @@ print_about_full() {
   Requisitos: macOS real, app Install macOS* em /Applications,
   pendrive/SSD externo (16 GB+) e senha de administrador.
 
-  Navegação: ↑↓ mover   Enter selecionar   letra atalho direto
+  Navegação: ↑↓ mover   Enter selecionar   número atalho direto
+             Home/End primeiro/último item   Q ou Esc voltar
 
   Pré-requisitos (qualquer ordem): [M] instalador  [D] disco
   Fluxo após os pré-requisitos:   [F] formatar  [B] bootável  [E] EFI
 
   Formato do pendrive: Mac OS Extended (JHFS+) — exigido pelo
   createinstallmedia em versões recentes (não use APFS no USB).
+
+  Log de erros: $LOG_FILE
 EOF
     printf "${C_RESET}"
     echo ""
@@ -217,6 +244,18 @@ print_goodbye() {
     read "?${C_DIM}Pressione ENTER para fechar...${C_RESET}"
     close_terminal
     exit 0
+}
+
+# =========================================================
+# Log
+# =========================================================
+
+log_info() {
+    printf "[%s] INFO: %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$LOG_FILE"
+}
+
+log_error() {
+    printf "[%s] ERROR: %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$LOG_FILE"
 }
 
 # =========================================================
@@ -247,18 +286,91 @@ spinner_stop() {
 }
 
 # =========================================================
-# Barra de progresso
+# Barra de progresso + tempo decorrido
 # =========================================================
 
 draw_progress_bar() {
-    local pct="$1" label="${2:-}"
-    local width=36 filled empty bar i
+    local pct="$1" label="${2:-}" elapsed="${3:-}"
+    local width=32 filled empty bar i
     (( filled = pct * width / 100 ))
     (( empty  = width - filled ))
     bar=""
     for (( i=0; i<filled; i++ )); do bar+="█"; done
     for (( i=0; i<empty;  i++ )); do bar+="░"; done
-    printf "\r  ${C_ACCENT}[%s]${C_RESET} ${C_BOLD}%3d%%${C_RESET}  ${C_DIM}%s${C_RESET}  " "$bar" "$pct" "$label"
+    local elapsed_str=""
+    [[ -n "$elapsed" ]] && elapsed_str="  ${C_DIM}${elapsed}${C_RESET}"
+    printf "\r  ${C_ACCENT}[%s]${C_RESET} ${C_BOLD}%3d%%${C_RESET}  ${C_DIM}%s${C_RESET}%s  " \
+        "$bar" "$pct" "$label" "$elapsed_str"
+}
+
+format_elapsed() {
+    local secs="$1"
+    if (( secs < 60 )); then
+        printf "%ds" "$secs"
+    else
+        printf "%dm%02ds" "$(( secs / 60 ))" "$(( secs % 60 ))"
+    fi
+}
+
+# =========================================================
+# Confirmação visual (substitui s/n digitado)
+#
+# Uso: confirm_visual "Pergunta?"
+# Retorna 0 (sim) ou 1 (não/cancelado)
+# =========================================================
+
+confirm_visual() {
+    local prompt="${1:-Confirmar?}"
+    local n=2 sel=2 key key2 key3  # padrão: Não
+
+    echo ""
+    printf "  ${C_BOLD}%s${C_RESET}\n" "$prompt"
+    echo ""
+
+    printf '\033[?25l'
+    printf '\0337'
+
+    while true; do
+        printf '\0338'
+        if (( sel == 1 )); then
+            printf "\r\033[K  ${C_ACCENT}▶ [1]${C_RESET}  ${C_BOLD}Sim${C_RESET}\n"
+            printf "\r\033[K    ${C_DIM}[2]  Não${C_RESET}\n"
+        else
+            printf "\r\033[K    ${C_DIM}[1]  Sim${C_RESET}\n"
+            printf "\r\033[K  ${C_ACCENT}▶ [2]${C_RESET}  ${C_BOLD}Não${C_RESET}\n"
+        fi
+        printf "\r\033[K\n"
+        printf "\r\033[K  ${C_DIM}↑↓ navegar   Enter confirmar   Esc cancelar${C_RESET}"
+
+        read -k 1 -s key
+
+        case "$key" in
+            $'\033')
+                key2=""; read -k 1 -s -t 0.05 key2 2>/dev/null
+                if [[ "$key2" == "[" ]]; then
+                    key3=""; read -k 1 -s -t 0.05 key3 2>/dev/null
+                    [[ "$key3" == "A" ]] && sel=$(( sel > 1 ? sel - 1 : n ))
+                    [[ "$key3" == "B" ]] && sel=$(( sel < n ? sel + 1 : 1 ))
+                else
+                    printf '\0338'; printf "\033[%dB\r\n" $(( n + 2 ))
+                    printf '\033[?25h'; return 1
+                fi
+                ;;
+            $'\n'|$'\r')
+                printf '\0338'; printf "\033[%dB\r\n" $(( n + 2 ))
+                printf '\033[?25h'
+                (( sel == 1 )) && return 0 || return 1
+                ;;
+            1) printf '\0338'; printf "\033[%dB\r\n" $(( n + 2 ))
+               printf '\033[?25h'; return 0 ;;
+            2) printf '\0338'; printf "\033[%dB\r\n" $(( n + 2 ))
+               printf '\033[?25h'; return 1 ;;
+            [sS]) printf '\0338'; printf "\033[%dB\r\n" $(( n + 2 ))
+               printf '\033[?25h'; return 0 ;;
+            [nN]) printf '\0338'; printf "\033[%dB\r\n" $(( n + 2 ))
+               printf '\033[?25h'; return 1 ;;
+        esac
+    done
 }
 
 # =========================================================
@@ -287,29 +399,30 @@ show_disk_volumes() {
 # Uso:  interactive_picker "item1" "item2" ...
 # Resultado em $PICKER_RESULT (índice 1-based)
 # Retorna 0 = selecionado, 1 = cancelado
-# Atalhos: ↑↓ navegar · Enter confirmar · letra pula+confirma · Q cancela
+# Atalhos: ↑↓ navegar (com wrap) · Enter confirmar
+#          número atalho direto · Home/End · Q/Esc cancela
 # =========================================================
 
 interactive_picker() {
     local -a items=("$@")
-    local n=${#items[@]} sel=1 key key2 key3 ku i
+    local n=${#items[@]} sel=1 key key2 key3 i
 
-    printf '\033[?25l'  # oculta cursor
-    printf '\0337'      # salva posição do cursor
+    printf '\033[?25l'
+    printf '\0337'
 
     while true; do
-        printf '\0338'  # restaura posição salva e redesenha
+        printf '\0338'
         for (( i=1; i<=n; i++ )); do
             if (( i == sel )); then
-                printf "\r\033[K  ${C_ACCENT}▶ [%s]${C_RESET}  ${C_BOLD}%s${C_RESET}\n" \
-                    "${MENU_LETTERS[$i]}" "${items[$i]}"
+                printf "\r\033[K  ${C_ACCENT}▶ [%d]${C_RESET}  ${C_BOLD}%s${C_RESET}\n" \
+                    "$i" "${items[$i]}"
             else
-                printf "\r\033[K    ${C_DIM}[%s]  %s${C_RESET}\n" \
-                    "${MENU_LETTERS[$i]}" "${items[$i]}"
+                printf "\r\033[K    ${C_DIM}[%d]  %s${C_RESET}\n" \
+                    "$i" "${items[$i]}"
             fi
         done
         printf "\r\033[K\n"
-        printf "\r\033[K  ${C_DIM}↑↓ navegar   Enter selecionar   Q voltar${C_RESET}"
+        printf "\r\033[K  ${C_DIM}↑↓ navegar   Enter selecionar   número atalho   Q voltar${C_RESET}"
 
         read -k 1 -s key
 
@@ -318,10 +431,21 @@ interactive_picker() {
                 key2=""; read -k 1 -s -t 0.05 key2 2>/dev/null
                 if [[ "$key2" == "[" ]]; then
                     key3=""; read -k 1 -s -t 0.05 key3 2>/dev/null
-                    [[ "$key3" == "A" ]] && (( sel > 1 )) && (( sel-- ))
-                    [[ "$key3" == "B" ]] && (( sel < n )) && (( sel++ ))
+                    case "$key3" in
+                        A) sel=$(( sel > 1 ? sel - 1 : n )) ;;    # Up — wrap
+                        B) sel=$(( sel < n ? sel + 1 : 1 )) ;;    # Down — wrap
+                        H) sel=1 ;;                                 # Home
+                        F) sel=$n ;;                                # End
+                        1)  # Home via \033[1~
+                            local k4=""; read -k 1 -s -t 0.05 k4 2>/dev/null
+                            [[ "$k4" == "~" ]] && sel=1
+                            ;;
+                        4)  # End via \033[4~
+                            local k4=""; read -k 1 -s -t 0.05 k4 2>/dev/null
+                            [[ "$k4" == "~" ]] && sel=$n
+                            ;;
+                    esac
                 else
-                    # ESC puro = cancelar
                     printf '\0338'; printf "\033[%dB\r\n" $(( n + 2 ))
                     printf '\033[?25h'; return 1
                 fi
@@ -334,29 +458,27 @@ interactive_picker() {
                 printf '\0338'; printf "\033[%dB\r\n" $(( n + 2 ))
                 printf '\033[?25h'; return 1
                 ;;
-            [a-zA-Z])
-                ku="${key:u}"
-                for (( i=1; i<=n; i++ )); do
-                    if [[ "${MENU_LETTERS[$i]}" == "$ku" ]]; then
-                        printf '\0338'; printf "\033[%dB\r\n" $(( n + 2 ))
-                        printf '\033[?25h'; PICKER_RESULT=$i; return 0
-                    fi
-                done
+            [1-9])
+                local num="$key"
+                if (( num >= 1 && num <= n )); then
+                    printf '\0338'; printf "\033[%dB\r\n" $(( n + 2 ))
+                    printf '\033[?25h'; PICKER_RESULT=$num; return 0
+                fi
                 ;;
         esac
     done
 }
 
 # =========================================================
-# Seleção interativa do menu principal com setas do teclado
+# Seleção interativa do menu principal
 #
-# Args: "action|label|style" ... (style: accent | dim)
+# Args: "action|label" ...
 # Resultado em $MENU_RESULT (action string)
 # =========================================================
 
 main_menu_picker() {
     local -a entries=("$@")
-    local n=${#entries[@]} sel=1 key key2 key3 i action label style kl
+    local n=${#entries[@]} sel=1 key key2 key3 i action label
 
     MENU_RESULT=""
     printf '\033[?25l'
@@ -365,16 +487,16 @@ main_menu_picker() {
     while true; do
         printf '\0338'
         for (( i=1; i<=n; i++ )); do
-            IFS='|' read -r action label style <<< "${entries[$i]}"
+            IFS='|' read -r action label <<< "${entries[$i]}"
             if (( i == sel )); then
-                printf "\r\033[K  ${C_ACCENT}▶ [%s]${C_RESET}  ${C_BOLD}%s${C_RESET}\n" \
-                    "${action:u}" "$label"
+                printf "\r\033[K  ${C_ACCENT}▶ [%d]${C_RESET}  ${C_BOLD}%s${C_RESET}\n" \
+                    "$i" "$label"
             else
-                printf "\r\033[K    ${C_DIM}[%s]  %s${C_RESET}\n" "${action:u}" "$label"
+                printf "\r\033[K    ${C_DIM}[%d]  %s${C_RESET}\n" "$i" "$label"
             fi
         done
         printf "\r\033[K\n"
-        printf "\r\033[K  ${C_DIM}↑↓ navegar   Enter selecionar${C_RESET}"
+        printf "\r\033[K  ${C_DIM}↑↓ navegar   Enter selecionar   número atalho${C_RESET}"
 
         read -k 1 -s key
 
@@ -383,12 +505,16 @@ main_menu_picker() {
                 key2=""; read -k 1 -s -t 0.05 key2 2>/dev/null
                 if [[ "$key2" == "[" ]]; then
                     key3=""; read -k 1 -s -t 0.05 key3 2>/dev/null
-                    [[ "$key3" == "A" ]] && (( sel > 1 )) && (( sel-- ))
-                    [[ "$key3" == "B" ]] && (( sel < n )) && (( sel++ ))
+                    case "$key3" in
+                        A) sel=$(( sel > 1 ? sel - 1 : n )) ;;
+                        B) sel=$(( sel < n ? sel + 1 : 1 )) ;;
+                        H) sel=1 ;;
+                        F) sel=$n ;;
+                    esac
                 fi
                 ;;
             $'\n'|$'\r')
-                IFS='|' read -r action label style <<< "${entries[$sel]}"
+                IFS='|' read -r action label <<< "${entries[$sel]}"
                 printf '\0338'; printf "\033[%dB\r\n" $(( n + 2 ))
                 printf '\033[?25h'; MENU_RESULT="$action"; return 0
                 ;;
@@ -396,15 +522,13 @@ main_menu_picker() {
                 printf '\0338'; printf "\033[%dB\r\n" $(( n + 2 ))
                 printf '\033[?25h'; MENU_RESULT="!"; return 0
                 ;;
-            [a-zA-Z])
-                kl="${key:l}"
-                for (( i=1; i<=n; i++ )); do
-                    IFS='|' read -r action label style <<< "${entries[$i]}"
-                    if [[ "$action" == "$kl" ]]; then
-                        printf '\0338'; printf "\033[%dB\r\n" $(( n + 2 ))
-                        printf '\033[?25h'; MENU_RESULT="$action"; return 0
-                    fi
-                done
+            [1-9])
+                local num="$key"
+                if (( num >= 1 && num <= n )); then
+                    IFS='|' read -r action label <<< "${entries[$num]}"
+                    printf '\0338'; printf "\033[%dB\r\n" $(( n + 2 ))
+                    printf '\033[?25h'; MENU_RESULT="$action"; return 0
+                fi
                 ;;
         esac
     done
@@ -449,7 +573,6 @@ sync_disk_state() {
     fi
 }
 
-
 print_subscreen() {
     local title="$1"
     clear_screen
@@ -467,16 +590,14 @@ show_menu() {
 
     clear_screen
 
-    if term_too_small; then
-        init_terminal
-    fi
-
     if (( DEMO_MODE )); then
         print_banner "${C_WARN}DEMO — nenhum disco será modificado${C_RESET}"
     else
         print_banner "$APP_TAGLINE"
     fi
     print_about_short
+    echo ""
+    print_step_indicator
     echo ""
 
     if [[ -n "$SELECTED_DISK_NAME" ]]; then
@@ -499,39 +620,33 @@ show_menu() {
     local -a _items=()
 
     if (( INSTALLER_CREATED )); then
-        # EFI pronta — ação principal
-        _items+=("e|Montar e abrir EFI (OpenCore)|accent")
-        _items+=("f|Reformatar disco (opcional)|dim")
-        _items+=("m|Trocar instalador macOS|dim")
-        _items+=("d|Trocar disco|dim")
+        _items+=("e|Montar e abrir EFI (OpenCore)")
+        _items+=("f|Reformatar disco (opcional)")
+        _items+=("m|Trocar instalador macOS")
+        _items+=("d|Trocar disco")
     elif [[ -n "$SELECTED_DISK" && -n "$SELECTED_INSTALLER" && $DISK_FORMATTED -eq 1 ]]; then
-        # Tudo pronto para criar
-        _items+=("b|Criar mídia bootável|accent")
-        _items+=("f|Reformatar disco (opcional)|dim")
-        _items+=("m|Trocar instalador macOS|dim")
-        _items+=("d|Trocar disco|dim")
+        _items+=("b|Criar mídia bootável")
+        _items+=("f|Reformatar disco (opcional)")
+        _items+=("m|Trocar instalador macOS")
+        _items+=("d|Trocar disco")
     elif [[ -n "$SELECTED_DISK" && -n "$SELECTED_INSTALLER" ]]; then
-        # Disco e instalador prontos — precisa formatar
-        _items+=("f|Formatar disco (apaga tudo)|accent")
-        _items+=("m|Trocar instalador macOS|dim")
-        _items+=("d|Trocar disco|dim")
+        _items+=("f|Formatar disco (apaga tudo)")
+        _items+=("m|Trocar instalador macOS")
+        _items+=("d|Trocar disco")
     elif [[ -z "$SELECTED_DISK" && -n "$SELECTED_INSTALLER" ]]; then
-        # Só tem instalador — precisa de disco
-        _items+=("d|Selecionar disco USB/SSD|accent")
-        _items+=("m|Trocar instalador macOS|dim")
+        _items+=("d|Selecionar disco USB/SSD")
+        _items+=("m|Trocar instalador macOS")
     elif [[ -n "$SELECTED_DISK" && -z "$SELECTED_INSTALLER" ]]; then
-        # Só tem disco — precisa de instalador
-        _items+=("m|Obter instalador macOS|accent")
-        (( ! DISK_FORMATTED )) && _items+=("f|Formatar disco|dim")
-        _items+=("d|Trocar disco|dim")
+        _items+=("m|Obter instalador macOS")
+        (( ! DISK_FORMATTED )) && _items+=("f|Formatar disco")
+        _items+=("d|Trocar disco")
     else
-        # Nada selecionado — dois pré-requisitos independentes
-        _items+=("m|Obter instalador macOS|accent")
-        _items+=("d|Selecionar disco USB/SSD|accent")
+        _items+=("m|Obter instalador macOS")
+        _items+=("d|Selecionar disco USB/SSD")
     fi
 
-    _items+=("h|Ajuda / sobre|dim")
-    _items+=("q|Sair|dim")
+    _items+=("h|Ajuda / sobre")
+    _items+=("q|Sair")
 
     main_menu_picker "${_items[@]}"
 }
@@ -559,6 +674,12 @@ disk_details() {
             sub(/^   Disk Size:[[:space:]]*/, "", line)
             if (match(line, /^[0-9.]+[[:space:]]+[KMGT]B/))
                 size = substr(line, RSTART, RLENGTH)
+            # Extrai bytes: remove tudo antes do "(" e depois de " Bytes"
+            bytes_line = line
+            gsub(/.*\(/, "", bytes_line)
+            gsub(/ Bytes.*/, "", bytes_line)
+            gsub(/[^0-9]/, "", bytes_line)
+            bytes = bytes_line
         }
         /^   Protocol:/ {
             line = $0
@@ -571,99 +692,131 @@ disk_details() {
             if (name == "") name = "Sem nome"
             if (size == "") size = "—"
             if (proto == "") proto = "—"
-            print name "|" size "|" proto
+            if (bytes == "") bytes = "0"
+            print name "|" size "|" proto "|" bytes
         }'
 }
 
 choose_disk() {
-    # Confirmação ao trocar disco já selecionado
     if [[ -n "$SELECTED_DISK" ]]; then
         print_subscreen "Trocar disco"
         echo ""
         printf "  %-12s ${C_OK}%s${C_RESET} ${C_DIM}(/dev/%s)${C_RESET}\n" "Atual:" "$SELECTED_DISK_NAME" "$SELECTED_DISK"
         echo ""
-        printf "  ${C_DIM}Trocar o disco reinicia todas as etapas.${C_RESET}\n"
-        echo ""
-        read "CONFIRM?${C_BOLD}Continuar? (s/n):${C_RESET} "
-        [[ "${CONFIRM:l}" != "s" ]] && return
+        printf "  ${C_DIM}Trocar o disco reinicia as etapas de formatação e instalação.${C_RESET}\n"
+        confirm_visual "Trocar disco?" || return
     fi
 
-    print_subscreen "Selecionar disco"
+    local _refresh=1
+    local -a DISKS=() _display=()
+    local -A _seen=()
 
-    typeset -a DISKS=()
-    local -a _display=()
+    while (( _refresh )); do
+        _refresh=0
+        DISKS=()
+        _display=()
+        _seen=()
 
-    if (( DEMO_MODE )); then
-        DISKS=("disk2" "disk3")
-        _display=(
-            "$(printf '%-14s %-22s %s' '/dev/disk2' 'Samsung USB 3.1' '32.0 GB')"
-            "$(printf '%-14s %-22s %s' '/dev/disk3' 'SanDisk Ultra'   '64.0 GB')"
-        )
-    else
-        typeset -A seen=()
-        local DISK
+        print_subscreen "Selecionar disco"
 
-        add_disk() {
-            local d="$1"
-            is_whole_disk "$d" || return
-            [[ -n "${seen[$d]}" ]] && return
-            seen[$d]=1
-            DISKS+=("$d")
-        }
+        if (( DEMO_MODE )); then
+            DISKS=("disk2" "disk3")
+            _display=(
+                "$(printf '%-14s %-22s %s' '/dev/disk2' 'Samsung USB 3.1' '32.0 GB')"
+                "$(printf '%-14s %-22s %s' '/dev/disk3' 'SanDisk Ultra'   '64.0 GB')"
+            )
+        else
+            add_disk() {
+                local _d="$1"
+                is_whole_disk "$_d" || return
+                [[ -n "${_seen[$_d]}" ]] && return
+                _seen[$_d]=1
+                DISKS+=("$_d")
+            }
 
-        while IFS= read -r DISK; do
-            add_disk "$DISK"
-        done < <(diskutil list 2>/dev/null | awk '/^\/dev\/disk[0-9]+ \(external/ {
-            gsub("/dev/", "", $1); print $1
-        }')
-
-        while IFS= read -r DISK; do
-            add_disk "$DISK"
-        done < <(diskutil list external physical 2>/dev/null | awk '/^\/dev\/disk[0-9]+ \(/ {
-            gsub("/dev/", "", $1); print $1
-        }')
-
-        if (( ${#DISKS[@]} == 0 )); then
             while IFS= read -r DISK; do
-                is_whole_disk "$DISK" || continue
-                is_external_disk "$DISK" || continue
                 add_disk "$DISK"
-            done < <(diskutil list 2>/dev/null | awk '/^\/dev\/disk[0-9]+ \(.*physical\):/ {
+            done < <(diskutil list 2>/dev/null | awk '/^\/dev\/disk[0-9]+ \(external/ {
                 gsub("/dev/", "", $1); print $1
             }')
+
+            while IFS= read -r DISK; do
+                add_disk "$DISK"
+            done < <(diskutil list external physical 2>/dev/null | awk '/^\/dev\/disk[0-9]+ \(/ {
+                gsub("/dev/", "", $1); print $1
+            }')
+
+            if (( ${#DISKS[@]} == 0 )); then
+                while IFS= read -r DISK; do
+                    is_whole_disk "$DISK" || continue
+                    is_external_disk "$DISK" || continue
+                    add_disk "$DISK"
+                done < <(diskutil list 2>/dev/null | awk '/^\/dev\/disk[0-9]+ \(.*physical\):/ {
+                    gsub("/dev/", "", $1); print $1
+                }')
+            fi
+
+            local _i _d _n _s _p _b _warn
+            for _i in {1..${#DISKS[@]}}; do
+                _d="${DISKS[$_i]}"
+                IFS='|' read -r _n _s _p _b <<< "$(disk_details "$_d")"
+                _warn=""
+                (( _b > 0 && _b < 16000000000 )) && _warn=" ${C_WARN}⚠ <16 GB${C_RESET}"
+                _display+=("$(printf '%-14s %-22s %-10s' "/dev/$_d" "$_n" "$_s")${_warn}")
+            done
         fi
 
+        _display+=("↺  Atualizar lista de discos")
+
+        echo ""
+        if (( ${#DISKS[@]} == 0 && ! DEMO_MODE )); then
+            printf "  ${C_WARN}Nenhum disco externo encontrado.${C_RESET}\n"
+            printf "  ${C_DIM}Conecte um pendrive ou SSD USB e atualize a lista.${C_RESET}\n"
+        else
+            printf "  ${C_DIM}%-14s %-22s %-10s${C_RESET}\n" "Disco" "Nome" "Tamanho"
+        fi
+        echo ""
+
+        interactive_picker "${_display[@]}" || return
+
+        # Refresh selecionado
+        if (( PICKER_RESULT == ${#_display[@]} )); then
+            _refresh=1
+            continue
+        fi
+
+        # Não deveria chegar aqui sem discos, mas protege
         if (( ${#DISKS[@]} == 0 )); then
-            echo ""
-            printf "  ${C_WARN}Nenhum disco encontrado.${C_RESET} Conecte um pendrive/SSD USB.\n"
-            auto_return 3
+            auto_return 2
             return
         fi
 
-        local _i _d _n _s _p
-        for _i in {1..${#DISKS[@]}}; do
-            _d="${DISKS[$_i]}"
-            IFS='|' read -r _n _s _p <<< "$(disk_details "$_d")"
-            _display+=("$(printf '%-14s %-22s %s' "/dev/$_d" "$_n" "$_s")")
-        done
-    fi
+        SELECTED_DISK="${DISKS[$PICKER_RESULT]}"
+        SELECTED_DISK_NAME=$(
+            (( DEMO_MODE )) \
+                && echo "Samsung USB 3.1" \
+                || disk_media_name "$SELECTED_DISK"
+        )
+        INSTALLER_CREATED=0
+        DISK_FORMATTED=0
+        (( ! DEMO_MODE )) && sync_disk_state
 
-    echo ""
-    printf "  ${C_DIM}%-14s %-22s %-10s${C_RESET}\n" "Disco" "Nome" "Tamanho"
-    echo ""
-
-    interactive_picker "${_display[@]}" || return
-
-    SELECTED_DISK="${DISKS[$PICKER_RESULT]}"
-    SELECTED_DISK_NAME=$(
-        (( DEMO_MODE )) \
-            && echo "Samsung USB 3.1" \
-            || disk_media_name "$SELECTED_DISK"
-    )
-    SELECTED_INSTALLER=""
-    INSTALLER_CREATED=0
-    DISK_FORMATTED=0
-    (( ! DEMO_MODE )) && sync_disk_state
+        # Aviso se disco < 16 GB
+        if (( ! DEMO_MODE )); then
+            local _bytes
+            IFS='|' read -r _ _ _ _bytes <<< "$(disk_details "$SELECTED_DISK")"
+            if (( _bytes > 0 && _bytes < 16000000000 )); then
+                echo ""
+                printf "  ${C_WARN}⚠  Este disco tem menos de 16 GB.${C_RESET}\n"
+                printf "  ${C_DIM}   O instalador exige no mínimo 16 GB (recomendado 32 GB+).${C_RESET}\n"
+                if ! confirm_visual "Usar mesmo assim?"; then
+                    SELECTED_DISK=""
+                    SELECTED_DISK_NAME=""
+                    return
+                fi
+            fi
+        fi
+    done
 }
 
 format_disk() {
@@ -693,13 +846,7 @@ format_disk() {
     fi
 
     printf "  ${C_WARN}⚠  Todo o conteúdo do disco será APAGADO permanentemente.${C_RESET}\n"
-    echo ""
-    read "CONFIRM?${C_BOLD}Continuar? (s/n):${C_RESET} "
-    CONFIRM="${CONFIRM:l}"
-
-    if [[ "$CONFIRM" != "s" ]]; then
-        return
-    fi
+    confirm_visual "Formatar /dev/$SELECTED_DISK agora?" || return
 
     echo ""
 
@@ -714,6 +861,7 @@ format_disk() {
         printf "  ${C_DIM}·${C_RESET} Verificando permissões...\n"
         if ! sudo -v; then
             printf "  ${C_WARN}Senha incorreta ou sudo negado.${C_RESET}\n"
+            log_error "sudo -v falhou em format_disk"
             pause
             return
         fi
@@ -724,22 +872,23 @@ format_disk() {
         spinner_stop
 
         spinner_start "Formatando (GPT + Mac OS Extended)..."
-        local format_ok=0
-        if sudo diskutil eraseDisk "$DISK_FORMAT" "$VOLUME_NAME" GPT "/dev/$SELECTED_DISK" > /dev/null 2>&1; then
-            format_ok=1
-        fi
+        local fmt_out fmt_exit
+        fmt_out=$(sudo diskutil eraseDisk "$DISK_FORMAT" "$VOLUME_NAME" GPT "/dev/$SELECTED_DISK" 2>&1)
+        fmt_exit=$?
         spinner_stop
 
-        if (( ! format_ok )); then
+        if (( fmt_exit != 0 )); then
+            log_error "diskutil eraseDisk falhou (exit $fmt_exit): $fmt_out"
             printf "  ${C_WARN}Erro ao formatar o disco.${C_RESET}\n"
+            printf "  ${C_DIM}Log: %s${C_RESET}\n" "$LOG_FILE"
             pause
             return
         fi
     fi
 
     DISK_FORMATTED=1
-    SELECTED_INSTALLER=""
     INSTALLER_CREATED=0
+    # SELECTED_INSTALLER é preservado — o instalador é independente do disco
     SELECTED_DISK_NAME="$(disk_media_name "$SELECTED_DISK")"
     printf "  ${C_OK}✓ Formatação concluída.${C_RESET}\n"
     sleep 1
@@ -767,6 +916,7 @@ _do_download_macos() {
     echo ""
 
     local -a _titles=() _versions=() _sizes=()
+    local -a _display=()
 
     if (( DEMO_MODE )); then
         _titles=("macOS Sequoia" "macOS Sonoma")
@@ -781,6 +931,7 @@ _do_download_macos() {
         if ! echo "$raw" | grep -q '^\* Title:'; then
             printf "  ${C_WARN}Não foi possível obter a lista de instaladores.${C_RESET}\n"
             printf "  ${C_DIM}Verifique sua conexão com a internet.${C_RESET}\n"
+            log_error "softwareupdate --list-full-installers falhou: $raw"
             auto_return 4
             return 1
         fi
@@ -819,23 +970,27 @@ _do_download_macos() {
     local sel_title="${_titles[$idx]}"
     local sel_version="${_versions[$idx]}"
     local sel_size_kib="${_sizes[$idx]}"
-    local sel_gb
-    (( sel_gb = sel_size_kib / 1024 / 1024 ))
+    local sel_gb sel_bytes
+    (( sel_gb    = sel_size_kib / 1024 / 1024 ))
+    (( sel_bytes = sel_size_kib * 1024 ))
 
     echo ""
     printf "  ${C_BOLD}%s %s${C_RESET}\n" "$sel_title" "$sel_version"
     printf "  ${C_DIM}Tamanho aproximado: ~%d GB — pode levar vários minutos.${C_RESET}\n" "$sel_gb"
     printf "  ${C_DIM}Destino: /Applications${C_RESET}\n"
-    echo ""
-    read "CONFIRM?${C_BOLD}Baixar agora? (s/n):${C_RESET} "
-    [[ "${CONFIRM:l}" != "s" ]] && return 1
+
+    confirm_visual "Baixar agora?" || return 1
 
     echo ""
 
     if (( DEMO_MODE )); then
-        spinner_start "Baixando $sel_title $sel_version..."
-        sleep 2.5
-        spinner_stop
+        local _pct _el=0
+        for _pct in 0 5 12 20 29 38 47 56 65 74 82 89 95 100; do
+            draw_progress_bar "$_pct" "Baixando $sel_title" "$(format_elapsed $_el)"
+            sleep 0.14
+            (( _el += 2 ))
+        done
+        printf "\n"
         printf "  ${C_OK}✓ %s %s disponível em /Applications.${C_RESET}\n" "$sel_title" "$sel_version"
         printf "  ${C_DIM}  (simulado — nenhum download foi realizado)${C_RESET}\n"
         SELECTED_INSTALLER="/Applications/Install macOS Sequoia.app"
@@ -845,7 +1000,7 @@ _do_download_macos() {
         return 0
     fi
 
-    # Snapshot dos instaladores antes do download para detectar o novo
+    # Snapshot dos instaladores antes do download
     local -a _before=()
     local _app
     while IFS= read -r _app; do
@@ -854,22 +1009,58 @@ _do_download_macos() {
 
     local tmpfile
     tmpfile=$(mktemp /tmp/bootstick_dl_XXXXXX)
+    log_info "Iniciando download: $sel_title $sel_version"
 
     softwareupdate --fetch-full-installer --full-installer-version "$sel_version" \
         > "$tmpfile" 2>&1 &
     local dl_pid=$!
 
-    spinner_start "Baixando $sel_title $sel_version..."
+    local start_time=$SECONDS elapsed pct=0 app_path="" app_bytes
+
+    draw_progress_bar 0 "Conectando..." "0s"
+
+    while kill -0 "$dl_pid" 2>/dev/null; do
+        elapsed=$(( SECONDS - start_time ))
+
+        # Detectar .app novo em /Applications
+        if [[ -z "$app_path" ]]; then
+            for _app in /Applications/Install\ macOS*.app(N); do
+                local _found=0 _b
+                for _b in "${_before[@]}"; do
+                    [[ "$_b" == "$_app" ]] && { _found=1; break; }
+                done
+                (( ! _found )) && { app_path="$_app"; break; }
+            done
+        fi
+
+        if [[ -n "$app_path" && -d "$app_path" && sel_bytes -gt 0 ]]; then
+            app_bytes=$(du -sk -- "$app_path" 2>/dev/null | awk '{print $1 * 1024}')
+            if (( app_bytes > 0 )); then
+                pct=$(( app_bytes * 100 / sel_bytes ))
+                (( pct > 99 )) && pct=99
+            fi
+        fi
+
+        draw_progress_bar "$pct" "Baixando $sel_title" "$(format_elapsed $elapsed)"
+        sleep 1
+    done
+
     wait "$dl_pid"
     local exit_status=$?
-    spinner_stop
+    local elapsed_total=$(( SECONDS - start_time ))
+
+    (( exit_status == 0 )) && draw_progress_bar 100 "Concluído" "$(format_elapsed $elapsed_total)"
+    printf "\n"
 
     local dl_output
     dl_output=$(cat "$tmpfile" 2>/dev/null)
+    printf "[%s] --- download output ---\n%s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$dl_output" >> "$LOG_FILE"
     rm -f "$tmpfile"
 
     if (( exit_status != 0 )); then
         printf "  ${C_WARN}Erro ao baixar o instalador (código %d).${C_RESET}\n" "$exit_status"
+        printf "  ${C_DIM}Log: %s${C_RESET}\n" "$LOG_FILE"
+        log_error "softwareupdate --fetch-full-installer falhou (exit $exit_status)"
         if echo "$dl_output" | grep -qiE "not compatible|incompatível"; then
             printf "  ${C_DIM}Esta versão pode não ser compatível com seu macOS atual.${C_RESET}\n"
         elif echo "$dl_output" | grep -qiE "not available|indisponível|not found"; then
@@ -881,6 +1072,7 @@ _do_download_macos() {
 
     printf "  ${C_OK}✓ %s %s disponível em /Applications.${C_RESET}\n" "$sel_title" "$sel_version"
     notify_macos "$APP_NAME" "$sel_title $sel_version disponível em /Applications."
+    log_info "Download concluído: $sel_title $sel_version em $(format_elapsed $elapsed_total)"
 
     # Auto-seleciona o instalador recém-baixado
     local _new_app _found _b
@@ -893,11 +1085,51 @@ _do_download_macos() {
         if (( ! _found )); then
             SELECTED_INSTALLER="$_new_app"
             INSTALLER_CREATED=0
-            printf "  ${C_DIM}↳ Selecionado: %s${C_RESET}\n" "$(installer_label "$_new_app")"
+            printf "  ${C_DIM}↳ Selecionado automaticamente: %s${C_RESET}\n" "$(installer_label "$_new_app")"
             break
         fi
     done < <(find_macos_installers)
 
+    sleep 1
+    return 0
+}
+
+_do_select_app_manual() {
+    print_subscreen "Selecionar instalador manualmente"
+    echo ""
+    printf "  ${C_DIM}Abrindo seletor de arquivo — escolha o Install macOS*.app${C_RESET}\n"
+    printf "  ${C_DIM}(útil para instaladores baixados via gibMacOS ou outros meios)${C_RESET}\n"
+    echo ""
+
+    local chosen
+    chosen=$(osascript 2>/dev/null <<'EOF'
+try
+    set chosen to choose file of type {"com.apple.application-bundle"} \
+        with prompt "Selecione o instalador macOS (.app):" \
+        default location (path to applications folder)
+    POSIX path of chosen
+on error
+    ""
+end try
+EOF
+    )
+
+    if [[ -z "$chosen" ]]; then
+        printf "  ${C_DIM}Nenhum arquivo selecionado.${C_RESET}\n"
+        sleep 1
+        return 1
+    fi
+
+    if [[ ! -x "${chosen}/Contents/Resources/createinstallmedia" ]]; then
+        printf "  ${C_WARN}O app selecionado não parece ser um instalador macOS válido.${C_RESET}\n"
+        printf "  ${C_DIM}Certifique-se de selecionar um .app com createinstallmedia dentro.${C_RESET}\n"
+        pause
+        return 1
+    fi
+
+    SELECTED_INSTALLER="$chosen"
+    INSTALLER_CREATED=0
+    printf "  ${C_OK}✓ Selecionado: %s${C_RESET}\n" "$(installer_label "$chosen")"
     sleep 1
     return 0
 }
@@ -931,13 +1163,23 @@ choose_macos() {
         fi
     fi
 
+    local _n_installers=${#_display[@]}
     _display+=("↓  Baixar dos servidores Apple...")
+    _display+=("📂 Selecionar .app manualmente (gibMacOS etc.)")
 
     echo ""
     interactive_picker "${_display[@]}" || return
 
-    if (( PICKER_RESULT == ${#_display[@]} )); then
+    local _download_idx=$(( _n_installers + 1 ))
+    local _manual_idx=$(( _n_installers + 2 ))
+
+    if (( PICKER_RESULT == _download_idx )); then
         _do_download_macos
+        return
+    fi
+
+    if (( PICKER_RESULT == _manual_idx )); then
+        _do_select_app_manual
         return
     fi
 
@@ -987,9 +1229,13 @@ mount_efi() {
     fi
 
     printf "  ${C_DIM}·${C_RESET} Montando /dev/$EFI_PART ...\n"
-    if ! sudo diskutil mount "/dev/$EFI_PART"; then
+    local efi_out
+    efi_out=$(sudo diskutil mount "/dev/$EFI_PART" 2>&1)
+    if (( $? != 0 )); then
         echo ""
         printf "  ${C_WARN}Erro ao montar EFI.${C_RESET}\n"
+        printf "  ${C_DIM}Log: %s${C_RESET}\n" "$LOG_FILE"
+        log_error "diskutil mount /dev/$EFI_PART falhou: $efi_out"
         pause
         return
     fi
@@ -1051,31 +1297,29 @@ create_installer() {
     printf "  %-14s %s\n" "Instalador:" "$(installer_label "$SELECTED_INSTALLER")"
     printf "  %-14s %s\n" "Volume:"     "$VOLUME_PATH"
     echo ""
-    read "CONFIRM?${C_BOLD}Continuar? (s/n):${C_RESET} "
-    CONFIRM="${CONFIRM:l}"
+    printf "  ${C_DIM}Pode levar 15–40 minutos. Não feche o Terminal.${C_RESET}\n"
 
-    if [[ "$CONFIRM" != "s" ]]; then
-        return
-    fi
+    confirm_visual "Iniciar criação da mídia bootável?" || return
 
     echo ""
     printf "  ${C_DIM}·${C_RESET} Iniciando createinstallmedia...\n"
-    printf "  ${C_DIM}  (pode levar 15–40 minutos — não feche o Terminal)${C_RESET}\n"
     echo ""
 
     if (( DEMO_MODE )); then
-        local phase pct
+        local phase pct _el=0
         phase="Apagando disco"
         for pct in 0 10 20 30 40 50 60 70 80 90 100; do
-            draw_progress_bar $pct "$phase"; sleep 0.12
+            draw_progress_bar $pct "$phase" "$(format_elapsed $_el)"; sleep 0.12
+            (( _el++ ))
         done
         phase="Copiando arquivos"
         for pct in 0 10 20 30 40 50 60 70 80 90 100; do
-            draw_progress_bar $pct "$phase"; sleep 0.20
+            draw_progress_bar $pct "$phase" "$(format_elapsed $_el)"; sleep 0.18
+            (( _el += 2 ))
         done
         phase="Tornando bootável"
-        draw_progress_bar 95 "$phase"; sleep 0.4
-        draw_progress_bar 100 "Concluído"; sleep 0.3
+        draw_progress_bar 95 "$phase" "$(format_elapsed $_el)"; sleep 0.4; (( _el++ ))
+        draw_progress_bar 100 "Concluído" "$(format_elapsed $_el)"; sleep 0.3
         printf "\n"
         printf "  ${C_OK}✓ Instalador bootável criado com sucesso.${C_RESET}\n"
         printf "  ${C_DIM}  (simulado — nenhum disco foi modificado)${C_RESET}\n"
@@ -1088,21 +1332,33 @@ create_installer() {
     printf "  ${C_DIM}·${C_RESET} Verificando permissões...\n"
     if ! sudo -v; then
         printf "  ${C_WARN}Senha incorreta ou sudo negado.${C_RESET}\n"
+        log_error "sudo -v falhou em create_installer"
         pause
         return
     fi
 
     local tmpfile
     tmpfile=$(mktemp /tmp/bootstick_XXXXXX)
+    log_info "Iniciando createinstallmedia: $SELECTED_INSTALLER → $VOLUME_PATH"
+
+    local create_pid="" _interrupted=0
+
+    # Ctrl+C cancela com limpeza
+    trap '
+        _interrupted=1
+        [[ -n "$create_pid" ]] && sudo kill "$create_pid" 2>/dev/null
+    ' INT
 
     sudo "$CREATE_MEDIA" --volume "$VOLUME_PATH" --nointeraction > "$tmpfile" 2>&1 &
-    local create_pid=$!
+    create_pid=$!
 
     local phase="Iniciando" prev_phase="" last_pct=0 latest_line pct
+    local start_time=$SECONDS elapsed
 
-    draw_progress_bar 0 "$phase"
+    draw_progress_bar 0 "$phase" "0s"
 
     while kill -0 "$create_pid" 2>/dev/null; do
+        elapsed=$(( SECONDS - start_time ))
         latest_line=$(tail -1 "$tmpfile" 2>/dev/null)
         prev_phase="$phase"
 
@@ -1118,27 +1374,45 @@ create_installer() {
             pct=$(echo "$latest_line" | grep -oE '[0-9]+' | tail -1)
             if [[ -n "$pct" ]] && (( pct >= last_pct && pct <= 100 )); then
                 last_pct=$pct
-                draw_progress_bar "$last_pct" "$phase"
             fi
         fi
 
+        draw_progress_bar "$last_pct" "$phase" "$(format_elapsed $elapsed)"
         sleep 0.5
     done
 
     wait "$create_pid"
     local exit_status=$?
+    trap - INT
 
-    (( exit_status == 0 )) && draw_progress_bar 100 "Concluído"
+    local elapsed_total=$(( SECONDS - start_time ))
+
+    if (( _interrupted )); then
+        printf "\n"
+        printf "  ${C_WARN}⚠  Operação cancelada pelo usuário.${C_RESET}\n"
+        log_info "createinstallmedia cancelado após $(format_elapsed $elapsed_total)"
+        cat "$tmpfile" >> "$LOG_FILE"
+        rm -f "$tmpfile"
+        pause
+        return
+    fi
+
+    (( exit_status == 0 )) && draw_progress_bar 100 "Concluído" "$(format_elapsed $elapsed_total)"
     printf "\n"
+    cat "$tmpfile" >> "$LOG_FILE"
     rm -f "$tmpfile"
 
     if (( exit_status != 0 )); then
         echo ""
         printf "  ${C_WARN}Erro ao criar instalador (código %d).${C_RESET}\n" "$exit_status"
+        printf "  ${C_DIM}Log: %s${C_RESET}\n" "$LOG_FILE"
         notify_macos "$APP_NAME" "Erro ao criar o instalador bootável."
+        log_error "createinstallmedia falhou (exit $exit_status) após $(format_elapsed $elapsed_total)"
         pause
         return
     fi
+
+    log_info "createinstallmedia concluído em $(format_elapsed $elapsed_total)"
 
     local verified=0 vol
     for vol in "/Volumes/Install macOS"*(N); do
@@ -1159,7 +1433,7 @@ create_installer() {
 }
 
 # =========================================================
-# Modo dev (oculto — pressione "!" no menu principal)
+# Modo demo (oculto — pressione "!" no menu principal)
 # =========================================================
 
 run_demo() {
@@ -1208,7 +1482,7 @@ fi
 init_terminal
 
 while true; do
-    show_menu  # bloqueia até o usuário selecionar; resultado em MENU_RESULT
+    show_menu
 
     case "$MENU_RESULT" in
         d) choose_disk ;;
