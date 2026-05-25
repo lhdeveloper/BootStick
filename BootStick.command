@@ -11,7 +11,7 @@ setopt NO_NOMATCH 2>/dev/null
 
 APP_NAME="BootStick"
 APP_TAGLINE="Assistente de mídia bootável para Hackintosh"
-SCRIPT_VERSION=$(git -C "$(dirname "$0")" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "1.5.0")
+SCRIPT_VERSION=$(git -C "$(dirname "$0")" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "1.6.0")
 SCRIPT_BUILD=$(date -r "$0" +%Y.%m.%d 2>/dev/null || echo "—")
 VOLUME_NAME="Install macOS"
 DISK_FORMAT="JHFS+"
