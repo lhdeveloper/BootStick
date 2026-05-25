@@ -2,6 +2,8 @@
 
 Assistente interativo em Terminal para criar mídia bootável de instalação do macOS em projetos Hackintosh (OpenCore).
 
+**[bootstick.vercel.app](https://bootstick.vercel.app)**
+
 <div align="center">
   <img src="assets/screenshot.png" style="border-radius:20px;" alt="BootStick screenshot" width="100%" height="100%"/>
 </div>
