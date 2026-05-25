@@ -2,6 +2,10 @@
 
 Assistente interativo em Terminal para criar mídia bootável de instalação do macOS em projetos Hackintosh (OpenCore).
 
+<p align="center">
+  <img src="assets/screenshot.png" alt="BootStick screenshot" width="700">
+</p>
+
 ---
 
 ## Para que serve
@@ -16,18 +20,18 @@ Dois pré-requisitos independentes — podem ser feitos em qualquer ordem:
 
 | | Ação |
 |-|------|
-| **M** | Obter instalador macOS — baixar dos servidores Apple ou selecionar um já existente em `/Applications` |
-| **D** | Selecionar disco USB/SSD externo |
+| **macOS** | Obter instalador — baixar dos servidores Apple ou selecionar um `.app` já existente em `/Applications` |
+| **Disco** | Selecionar o pendrive ou SSD externo |
 
 Com os dois prontos, o menu guia pelo restante:
 
 | | Ação |
 |-|------|
-| **F** | Formatar disco em GPT + Mac OS Extended (JHFS+) |
-| **B** | Criar mídia bootável |
-| **E** | Montar e abrir partição EFI no Finder |
+| **Formatar** | Formata o disco em GPT + Mac OS Extended (JHFS+) |
+| **Boot** | Cria a mídia bootável com `createinstallmedia` |
+| **EFI** | Monta e abre a partição EFI no Finder |
 
-Navegue com as setas ↑↓ ou pressione diretamente a letra da opção.
+Navegue com as setas ↑↓ ou pressione o número da opção.
 
 ---
 
@@ -37,7 +41,7 @@ Navegue com as setas ↑↓ ou pressione diretamente a letra da opção.
 - Instalador do macOS em `/Applications`
 - Pendrive ou SSD externo — mínimo 16 GB (recomendado 32 GB+)
 - Senha de administrador (`sudo`)
-- OpenCore — o BootStick não gera EFI; copie sua pasta `EFI` manualmente após a etapa **E**
+- OpenCore — o BootStick não gera EFI; copie sua pasta `EFI` manualmente após a etapa **EFI**
 
 ---
 
@@ -56,6 +60,6 @@ Ou dê duplo clique no `BootStick.command` no Finder.
 
 ## Avisos
 
-- A etapa **F** apaga todos os dados do disco selecionado.
+- A etapa **Formatar** apaga todos os dados do disco selecionado.
 - Confirme sempre o disco antes de formatar.
 - Use por sua conta e risco.
